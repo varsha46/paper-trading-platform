@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import "./App.css";
+const API_URL = "/api";
 
 function App() {
   const [balance, setBalance] = useState(null);
@@ -12,33 +13,92 @@ const [messageType, setMessageType] = useState("");
 const [quantities, setQuantities] = useState({});
 
   const loadDashboard = () => {
-    fetch("http://127.0.0.1:8000/users/1/balance")
+    fetch(`${API_URL}/users/1/balance`)
       .then((response) => response.json())
       .then((data) => setBalance(data.balance));
 
-    fetch("http://127.0.0.1:8000/stocks")
+    fetch(`${API_URL}/stocks`)
       .then((response) => response.json())
       .then((data) => setStocks(data));
 
-    fetch("http://127.0.0.1:8000/users/1/portfolio")
+    fetch(`${API_URL}/users/1/portfolio`)
       .then((response) => response.json())
       .then((data) => setPortfolio(data));
 
-    fetch("http://127.0.0.1:8000/users/1/orders")
+    fetch(`${API_URL}/users/1/orders`)
       .then((response) => response.json())
       .then((data) => setOrders(data));
   };
 
   useEffect(() => {
-    loadDashboard();
-  }, []);
+
+  // Load dashboard initially
+  loadDashboard();
+
+  // Connect to FastAPI WebSocket
+  const socket = new WebSocket(
+    `ws://${window.location.host}/ws/prices`
+  );
+
+  socket.onopen = () => {
+    console.log("WebSocket connected");
+  };
+
+  socket.onmessage = (event) => {
+
+    const data = JSON.parse(event.data);
+
+    console.log("Price update received:", data);
+
+    if (data.type === "price_update") {
+
+      setStocks((currentStocks) =>
+        currentStocks.map((stock) => {
+
+          const updatedStock = data.stocks.find(
+            (item) => item.symbol === stock.symbol
+          );
+
+          if (updatedStock) {
+            return {
+              ...stock,
+              price: updatedStock.new_price
+            };
+          }
+
+          return stock;
+        })
+      );
+
+      // Reload portfolio so current value and P&L
+      // also use the latest stock price.
+      fetch(`${API_URL}/users/1/portfolio`)
+        .then((response) => response.json())
+        .then((data) => setPortfolio(data));
+    }
+  };
+
+  socket.onerror = (error) => {
+    console.error("WebSocket error:", error);
+  };
+
+  socket.onclose = () => {
+    console.log("WebSocket disconnected");
+  };
+
+  // Close WebSocket when React component is removed
+  return () => {
+    socket.close();
+  };
+
+}, []);
 
   const placeOrder = (stockId, action) => {
   setLoading(true);
   setMessage("");
   setMessageType("");
 
-  fetch("http://127.0.0.1:8000/orders", {
+  fetch(`${API_URL}/orders`,  {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

@@ -1,25 +1,85 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Literal
 
+from apscheduler.schedulers.background import BackgroundScheduler
+
 from database import db
+from price_service import fetch_live_prices, is_market_open
 
 
 app = FastAPI()
+
+
+# =========================================================
+# CORS
+# =========================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "http://localhost:5173",
-    "http://16.171.0.118",
-],
+        "http://localhost:5173",
+        "http://16.171.0.118",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # =========================================================
-# REQUEST MODELS
+# WEBSOCKET CONNECTION MANAGER
+# =========================================================
+
+class ConnectionManager:
+
+    def __init__(self):
+        self.active_connections = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message):
+        disconnected = []
+
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                disconnected.append(connection)
+
+        for connection in disconnected:
+            self.disconnect(connection)
+
+
+manager = ConnectionManager()
+
+
+# =========================================================
+# WEBSOCKET ENDPOINT
+# =========================================================
+
+@app.websocket("/ws/prices")
+async def websocket_prices(websocket: WebSocket):
+
+    await manager.connect(websocket)
+
+    try:
+        while True:
+            await websocket.receive_text()
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+# =========================================================
+# PYDANTIC MODEL
 # =========================================================
 
 class OrderCreate(BaseModel):
@@ -30,18 +90,18 @@ class OrderCreate(BaseModel):
 
 
 # =========================================================
-# HOME
+# ROOT
 # =========================================================
 
 @app.get("/")
 def home():
     return {
-        "message": "Paper Trading Platform API"
+        "message": "Paper Trading API is running"
     }
 
 
 # =========================================================
-# GET ALL STOCKS
+# GET STOCKS
 # =========================================================
 
 @app.get("/stocks")
@@ -51,18 +111,103 @@ def get_stocks():
     cursor = connection.cursor(dictionary=True)
 
     try:
-
         cursor.execute("""
-            SELECT
-                id,
-                symbol,
-                price
+            SELECT id, symbol, price
             FROM stocks
+            ORDER BY symbol
         """)
 
         stocks = cursor.fetchall()
 
         return stocks
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
+# =========================================================
+# REFRESH STOCK PRICES
+# =========================================================
+
+@app.post("/stocks/refresh-prices")
+async def refresh_stock_prices():
+
+    connection = db.get_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+
+        cursor.execute("""
+            SELECT id, symbol
+            FROM stocks
+        """)
+
+        stocks = cursor.fetchall()
+
+        if not stocks:
+            return {
+                "message": "No stocks in database to refresh",
+                "updated": [],
+                "failed": {}
+            }
+
+        symbols = [stock["symbol"] for stock in stocks]
+
+        live_prices, errors = fetch_live_prices(symbols)
+
+        updated = []
+
+        for stock in stocks:
+
+            symbol = stock["symbol"]
+
+            if symbol not in live_prices:
+                continue
+
+            new_price = live_prices[symbol]
+
+            cursor.execute("""
+                UPDATE stocks
+                SET price = %s
+                WHERE id = %s
+            """, (
+                new_price,
+                stock["id"]
+            ))
+
+            updated.append({
+                "symbol": symbol,
+                "new_price": new_price
+            })
+
+        connection.commit()
+
+        # -------------------------------------------------
+        # SEND UPDATED PRICES TO ALL WEBSOCKET CLIENTS
+        # -------------------------------------------------
+
+        if updated:
+
+            await manager.broadcast({
+                "type": "price_update",
+                "stocks": updated
+            })
+
+        return {
+            "message": f"Refreshed {len(updated)} of {len(stocks)} stock prices",
+            "updated": updated,
+            "failed": errors
+        }
+
+    except Exception as error:
+
+        connection.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Price refresh failed: {str(error)}"
+        )
 
     finally:
 
@@ -85,6 +230,7 @@ def get_orders():
         cursor.execute("""
             SELECT
                 orders.id,
+                orders.user_id,
                 users.username,
                 stocks.symbol,
                 orders.quantity,
@@ -121,17 +267,14 @@ def get_balance(user_id: int):
     try:
 
         cursor.execute("""
-            SELECT
-                id,
-                username,
-                balance
+            SELECT id, username, balance
             FROM users
             WHERE id = %s
         """, (user_id,))
 
         user = cursor.fetchone()
 
-        if user is None:
+        if not user:
             raise HTTPException(
                 status_code=404,
                 detail="User not found"
@@ -146,7 +289,7 @@ def get_balance(user_id: int):
 
 
 # =========================================================
-# CREATE ORDER
+# CREATE BUY / SELL ORDER
 # =========================================================
 
 @app.post("/orders")
@@ -158,54 +301,46 @@ def create_order(order: OrderCreate):
     try:
 
         # -------------------------------------------------
-        # 1. Check user
+        # CHECK USER
         # -------------------------------------------------
 
         cursor.execute("""
-            SELECT
-                id,
-                balance
+            SELECT id, username, balance
             FROM users
             WHERE id = %s
         """, (order.user_id,))
 
         user = cursor.fetchone()
 
-        if user is None:
+        if not user:
+
             raise HTTPException(
                 status_code=404,
                 detail="User not found"
             )
 
-
         # -------------------------------------------------
-        # 2. Check stock
+        # CHECK STOCK
         # -------------------------------------------------
 
         cursor.execute("""
-            SELECT
-                id,
-                symbol,
-                price
+            SELECT id, symbol, price
             FROM stocks
             WHERE id = %s
         """, (order.stock_id,))
 
         stock = cursor.fetchone()
 
-        if stock is None:
+        if not stock:
+
             raise HTTPException(
                 status_code=404,
                 detail="Stock not found"
             )
 
+        stock_price = float(stock["price"])
 
-        # -------------------------------------------------
-        # 3. Calculate total order value
-        # -------------------------------------------------
-
-        total_cost = stock["price"] * order.quantity
-
+        total_value = stock_price * order.quantity
 
         # =================================================
         # BUY
@@ -213,26 +348,19 @@ def create_order(order: OrderCreate):
 
         if order.action == "BUY":
 
-            # ---------------------------------------------
             # Check balance
-            # ---------------------------------------------
 
-            if user["balance"] < total_cost:
+            if float(user["balance"]) < total_value:
 
                 raise HTTPException(
                     status_code=400,
-                    detail="Insufficient balance"
+                    detail="Insufficient virtual balance"
                 )
 
-
-            # ---------------------------------------------
             # Check existing holding
-            # ---------------------------------------------
 
             cursor.execute("""
-                SELECT
-                    quantity,
-                    average_price
+                SELECT id, quantity, average_price
                 FROM holdings
                 WHERE user_id = %s
                 AND stock_id = %s
@@ -243,15 +371,12 @@ def create_order(order: OrderCreate):
 
             holding = cursor.fetchone()
 
-
-            # ---------------------------------------------
-            # Existing holding
-            # ---------------------------------------------
-
             if holding:
 
                 old_quantity = holding["quantity"]
-                old_average_price = holding["average_price"]
+                old_average_price = float(
+                    holding["average_price"]
+                )
 
                 new_quantity = old_quantity + order.quantity
 
@@ -261,29 +386,20 @@ def create_order(order: OrderCreate):
                     )
                     +
                     (
-                        order.quantity * stock["price"]
+                        order.quantity * stock_price
                     )
                 ) / new_quantity
 
-
                 cursor.execute("""
                     UPDATE holdings
-                    SET
-                        quantity = %s,
+                    SET quantity = %s,
                         average_price = %s
-                    WHERE user_id = %s
-                    AND stock_id = %s
+                    WHERE id = %s
                 """, (
                     new_quantity,
                     new_average_price,
-                    order.user_id,
-                    order.stock_id
+                    holding["id"]
                 ))
-
-
-            # ---------------------------------------------
-            # First time buying stock
-            # ---------------------------------------------
 
             else:
 
@@ -300,37 +416,28 @@ def create_order(order: OrderCreate):
                     order.user_id,
                     order.stock_id,
                     order.quantity,
-                    stock["price"]
+                    stock_price
                 ))
 
-
-            # ---------------------------------------------
-            # Deduct virtual money
-            # ---------------------------------------------
+            # Deduct balance
 
             cursor.execute("""
                 UPDATE users
                 SET balance = balance - %s
                 WHERE id = %s
             """, (
-                total_cost,
+                total_value,
                 order.user_id
             ))
-
 
         # =================================================
         # SELL
         # =================================================
 
-        else:
-
-            # ---------------------------------------------
-            # Find holding
-            # ---------------------------------------------
+        elif order.action == "SELL":
 
             cursor.execute("""
-                SELECT
-                    quantity
+                SELECT id, quantity, average_price
                 FROM holdings
                 WHERE user_id = %s
                 AND stock_id = %s
@@ -341,86 +448,57 @@ def create_order(order: OrderCreate):
 
             holding = cursor.fetchone()
 
-
-            # ---------------------------------------------
-            # User doesn't own stock
-            # ---------------------------------------------
-
-            if holding is None:
+            if not holding:
 
                 raise HTTPException(
                     status_code=400,
                     detail="You do not own this stock"
                 )
 
-
-            # ---------------------------------------------
-            # Not enough shares
-            # ---------------------------------------------
-
             if holding["quantity"] < order.quantity:
 
                 raise HTTPException(
                     status_code=400,
-                    detail="Insufficient shares"
+                    detail="Insufficient stock quantity"
                 )
-
 
             remaining_quantity = (
                 holding["quantity"] - order.quantity
             )
 
-
-            # ---------------------------------------------
-            # Remove holding if quantity becomes zero
-            # ---------------------------------------------
-
             if remaining_quantity == 0:
 
                 cursor.execute("""
                     DELETE FROM holdings
-                    WHERE user_id = %s
-                    AND stock_id = %s
+                    WHERE id = %s
                 """, (
-                    order.user_id,
-                    order.stock_id
+                    holding["id"],
                 ))
-
-
-            # ---------------------------------------------
-            # Otherwise update quantity
-            # ---------------------------------------------
 
             else:
 
                 cursor.execute("""
                     UPDATE holdings
                     SET quantity = %s
-                    WHERE user_id = %s
-                    AND stock_id = %s
+                    WHERE id = %s
                 """, (
                     remaining_quantity,
-                    order.user_id,
-                    order.stock_id
+                    holding["id"]
                 ))
 
-
-            # ---------------------------------------------
-            # Add money to user balance
-            # ---------------------------------------------
+            # Add money back to virtual balance
 
             cursor.execute("""
                 UPDATE users
                 SET balance = balance + %s
                 WHERE id = %s
             """, (
-                total_cost,
+                total_value,
                 order.user_id
             ))
 
-
         # =================================================
-        # Save order
+        # INSERT ORDER HISTORY
         # =================================================
 
         cursor.execute("""
@@ -437,33 +515,24 @@ def create_order(order: OrderCreate):
             order.user_id,
             order.stock_id,
             order.quantity,
-            stock["price"],
+            stock_price,
             order.action
         ))
 
-
-        # =================================================
-        # Commit everything
-        # =================================================
-
         connection.commit()
 
-
         return {
-            "message": "Order created successfully",
-            "action": order.action,
+            "message": f"{order.action} order successful",
             "symbol": stock["symbol"],
             "quantity": order.quantity,
-            "price": stock["price"],
-            "total_value": total_cost
+            "price": stock_price,
+            "total_value": total_value
         }
-
 
     except HTTPException:
 
         connection.rollback()
         raise
-
 
     except Exception as error:
 
@@ -471,9 +540,8 @@ def create_order(order: OrderCreate):
 
         raise HTTPException(
             status_code=500,
-            detail="Internal server error"
+            detail=f"Order failed: {str(error)}"
         )
-
 
     finally:
 
@@ -482,7 +550,7 @@ def create_order(order: OrderCreate):
 
 
 # =========================================================
-# GET PORTFOLIO / HOLDINGS
+# GET USER PORTFOLIO
 # =========================================================
 
 @app.get("/users/{user_id}/portfolio")
@@ -495,28 +563,58 @@ def get_portfolio(user_id: int):
 
         cursor.execute("""
             SELECT
+                holdings.id,
                 holdings.stock_id,
                 stocks.symbol,
                 holdings.quantity,
                 holdings.average_price,
-                stocks.price AS current_price,
-                (
-                    holdings.quantity * stocks.price
-                ) AS current_value,
-                (
-                    (
-                        stocks.price
-                        - holdings.average_price
-                    )
-                    * holdings.quantity
-                ) AS profit_loss
+                stocks.price AS current_price
             FROM holdings
             JOIN stocks
                 ON holdings.stock_id = stocks.id
             WHERE holdings.user_id = %s
-        """, (user_id,))
+        """, (
+            user_id,
+        ))
 
-        portfolio = cursor.fetchall()
+        holdings = cursor.fetchall()
+
+        portfolio = []
+
+        for holding in holdings:
+
+            quantity = holding["quantity"]
+
+            average_price = float(
+                holding["average_price"]
+            )
+
+            current_price = float(
+                holding["current_price"]
+            )
+
+            invested_value = (
+                quantity * average_price
+            )
+
+            current_value = (
+                quantity * current_price
+            )
+
+            pnl = (
+                current_value - invested_value
+            )
+
+            portfolio.append({
+                "stock_id": holding["stock_id"],
+                "symbol": holding["symbol"],
+                "quantity": quantity,
+                "average_price": average_price,
+                "current_price": current_price,
+                "invested_value": invested_value,
+                "current_value": current_value,
+                "pnl": pnl
+            })
 
         return portfolio
 
@@ -527,7 +625,7 @@ def get_portfolio(user_id: int):
 
 
 # =========================================================
-# GET USER TRANSACTION HISTORY
+# GET USER ORDER HISTORY
 # =========================================================
 
 @app.get("/users/{user_id}/orders")
@@ -550,7 +648,9 @@ def get_user_orders(user_id: int):
                 ON orders.stock_id = stocks.id
             WHERE orders.user_id = %s
             ORDER BY orders.id DESC
-        """, (user_id,))
+        """, (
+            user_id,
+        ))
 
         orders = cursor.fetchall()
 
@@ -560,3 +660,89 @@ def get_user_orders(user_id: int):
 
         cursor.close()
         connection.close()
+
+
+# =========================================================
+# AUTOMATIC PRICE REFRESH
+# =========================================================
+
+scheduler = BackgroundScheduler()
+
+
+def automatic_price_refresh():
+
+    """
+    Runs automatically every 5 minutes.
+
+    Prices are refreshed only when
+    the NSE market is open.
+    """
+
+    if not is_market_open():
+
+        print("Market is closed. Skipping price refresh.")
+
+        return
+
+    print(
+        "Market is open. Starting automatic price refresh..."
+    )
+
+    try:
+
+        # Because refresh_stock_prices() is async,
+        # run it inside an async event loop.
+
+        import asyncio
+
+        result = asyncio.run(
+            refresh_stock_prices()
+        )
+
+        print(
+            "Automatic price refresh completed:"
+        )
+
+        print(result)
+
+    except Exception as error:
+
+        print(
+            f"Automatic price refresh failed: {error}"
+        )
+
+
+# =========================================================
+# START SCHEDULER
+# =========================================================
+
+@app.on_event("startup")
+def start_scheduler():
+
+    scheduler.add_job(
+        automatic_price_refresh,
+        "interval",
+        minutes=5,
+        id="stock_price_refresh",
+        replace_existing=True
+    )
+
+    scheduler.start()
+
+    print(
+        "Price refresh scheduler started."
+    )
+
+
+# =========================================================
+# STOP SCHEDULER
+# =========================================================
+
+@app.on_event("shutdown")
+def stop_scheduler():
+
+    scheduler.shutdown()
+
+    print(
+        "Price refresh scheduler stopped."
+    )
