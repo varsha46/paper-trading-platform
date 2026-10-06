@@ -13,29 +13,29 @@ const [messageType, setMessageType] = useState("");
 const [quantities, setQuantities] = useState({});
 
   const loadDashboard = () => {
-    fetch(`${API_URL}/users/1/balance`)
-      .then((response) => response.json())
-      .then((data) => setBalance(data.balance));
+  fetch(`${API_URL}/users/1/balance`)
+    .then((response) => response.json())
+    .then((data) => setBalance(data.balance));
 
-    fetch(`${API_URL}/stocks`)
-      .then((response) => response.json())
-      .then((data) => setStocks(data));
+  fetch(`${API_URL}/stocks`)
+    .then((response) => response.json())
+    .then((data) => setStocks(data));
 
-    fetch(`${API_URL}/users/1/portfolio`)
-      .then((response) => response.json())
-      .then((data) => setPortfolio(data));
+  fetch(`${API_URL}/users/1/portfolio`)
+    .then((response) => response.json())
+    .then((data) => setPortfolio(data));
 
-    fetch(`${API_URL}/users/1/orders`)
-      .then((response) => response.json())
-      .then((data) => setOrders(data));
-  };
+  fetch(`${API_URL}/users/1/orders`)
+    .then((response) => response.json())
+    .then((data) => setOrders(data));
+};
 
   useEffect(() => {
 
   // Load dashboard initially
   loadDashboard();
 
-  // Connect to FastAPI WebSocket
+  // Connect to FastAfetch(`${API_URL}/users/1/orders`)PI WebSocket
   const socket = new WebSocket(
     `ws://${window.location.host}/ws/prices`
   );
@@ -162,7 +162,7 @@ const [quantities, setQuantities] = useState({});
         </div>
 
         <div className="user-badge">
-          👤 Sheetal
+          👤 Varsha
         </div>
       </header>
 
@@ -205,13 +205,15 @@ const [quantities, setQuantities] = useState({});
     <span>Holdings Value</span>
 
     <h2>
-      ₹
-      {portfolio.reduce(
-        (total, item) =>
-          total + Number(item.current_value),
-        0
-      )}
-    </h2>
+  ₹
+  {portfolio
+    .reduce(
+      (total, item) =>
+        total + Number(item.current_value),
+      0
+    )
+    .toFixed(2)}
+</h2>
 
     <small>Current market value</small>
   </div>
@@ -447,13 +449,13 @@ const [quantities, setQuantities] = useState({});
                       <td
                         className={
                           Number(
-                            holding.profit_loss
+                            holding.pnl
                           ) >= 0
                             ? "profit"
                             : "loss"
                         }
                       >
-                        ₹{holding.profit_loss}
+                        ₹{holding.pnl}
                       </td>
 
                     </tr>
