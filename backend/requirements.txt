@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+mysql-connector-python
+python-dotenv
+APScheduler==3.11.3
+yfinance
+pytz
