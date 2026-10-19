@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import "./App.css";
+
 const API_URL = "/api";
 
 function App() {
@@ -8,157 +9,140 @@ function App() {
   const [portfolio, setPortfolio] = useState([]);
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
-const [message, setMessage] = useState("");
-const [messageType, setMessageType] = useState("");
-const [quantities, setQuantities] = useState({});
+  const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState("");
+  const [quantities, setQuantities] = useState({});
 
   const loadDashboard = () => {
-  fetch(`${API_URL}/users/1/balance`)
-    .then((response) => response.json())
-    .then((data) => setBalance(data.balance));
+    fetch(`${API_URL}/users/1/balance`)
+      .then((response) => response.json())
+      .then((data) => setBalance(data.balance));
 
-  fetch(`${API_URL}/stocks`)
-    .then((response) => response.json())
-    .then((data) => setStocks(data));
+    fetch(`${API_URL}/stocks`)
+      .then((response) => response.json())
+      .then((data) => setStocks(data));
 
-  fetch(`${API_URL}/users/1/portfolio`)
-    .then((response) => response.json())
-    .then((data) => setPortfolio(data));
+    fetch(`${API_URL}/users/1/portfolio`)
+      .then((response) => response.json())
+      .then((data) => setPortfolio(data));
 
-  fetch(`${API_URL}/users/1/orders`)
-    .then((response) => response.json())
-    .then((data) => setOrders(data));
-};
+    fetch(`${API_URL}/users/1/orders`)
+      .then((response) => response.json())
+      .then((data) => setOrders(data));
+  };
 
   useEffect(() => {
+    // Load the dashboard when the component mounts.
+    loadDashboard();
 
-  // Load dashboard initially
-  loadDashboard();
+    // Use secure WebSockets on HTTPS pages and regular WebSockets on HTTP pages.
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(
+      `${wsProtocol}//${window.location.host}/ws/prices`
+    );
 
-  // Connect to FastAfetch(`${API_URL}/users/1/orders`)PI WebSocket
-  const socket = new WebSocket(
-    const wsProtocol =
-  window.location.protocol === "https:" ? "wss:" : "ws:";
+    socket.onopen = () => {
+      console.log("WebSocket connected");
+    };
 
-const ws = new WebSocket(
-  `${wsProtocol}//${window.location.host}/ws/prices`
-);
-  );
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      console.log("Price update received:", data);
 
-  socket.onopen = () => {
-    console.log("WebSocket connected");
-  };
+      if (data.type === "price_update") {
+        setStocks((currentStocks) =>
+          currentStocks.map((stock) => {
+            const updatedStock = data.stocks.find(
+              (item) => item.symbol === stock.symbol
+            );
 
-  socket.onmessage = (event) => {
+            if (updatedStock) {
+              return {
+                ...stock,
+                price: updatedStock.new_price,
+              };
+            }
 
-    const data = JSON.parse(event.data);
+            return stock;
+          })
+        );
 
-    console.log("Price update received:", data);
+        // Refresh the portfolio so its current value and P&L use updated prices.
+        fetch(`${API_URL}/users/1/portfolio`)
+          .then((response) => response.json())
+          .then((portfolioData) => setPortfolio(portfolioData));
+      }
+    };
 
-    if (data.type === "price_update") {
+    socket.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
 
-      setStocks((currentStocks) =>
-        currentStocks.map((stock) => {
+    socket.onclose = () => {
+      console.log("WebSocket disconnected");
+    };
 
-          const updatedStock = data.stocks.find(
-            (item) => item.symbol === stock.symbol
-          );
-
-          if (updatedStock) {
-            return {
-              ...stock,
-              price: updatedStock.new_price
-            };
-          }
-
-          return stock;
-        })
-      );
-
-      // Reload portfolio so current value and P&L
-      // also use the latest stock price.
-      fetch(`${API_URL}/users/1/portfolio`)
-        .then((response) => response.json())
-        .then((data) => setPortfolio(data));
-    }
-  };
-
-  socket.onerror = (error) => {
-    console.error("WebSocket error:", error);
-  };
-
-  socket.onclose = () => {
-    console.log("WebSocket disconnected");
-  };
-
-  // Close WebSocket when React component is removed
-  return () => {
-    socket.close();
-  };
-
-}, []);
+    // Close the WebSocket when the React component is removed.
+    return () => {
+      socket.close();
+    };
+  }, []);
 
   const placeOrder = (stockId, action) => {
-  setLoading(true);
-  setMessage("");
-  setMessageType("");
+    setLoading(true);
+    setMessage("");
+    setMessageType("");
 
-  fetch(`${API_URL}/orders`,  {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      user_id: 1,
-      stock_id: stockId,
-      quantity: quantities[stockId] || 1,
-      action: action,
-    }),
-  })
-    .then(async (response) => {
-      const data = await response.json();
+    fetch(`${API_URL}/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        user_id: 1,
+        stock_id: stockId,
+        quantity: quantities[stockId] || 1,
+        action,
+      }),
+    })
+      .then(async (response) => {
+        const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(
-          data.detail || "Order failed"
+        if (!response.ok) {
+          throw new Error(data.detail || "Order failed");
+        }
+
+        return data;
+      })
+      .then((data) => {
+        setMessage(
+          `${action === "BUY" ? "Bought" : "Sold"} ${data.quantity} ${data.symbol} shares at ₹${data.price}`
         );
-      }
+        setMessageType("success");
 
-      return data;
-    })
-    .then((data) => {
-      setMessage(
-        `${action === "BUY" ? "Bought" : "Sold"} ${
-          data.quantity
-        } ${data.symbol} shares at ₹${data.price}`
-      );
+        loadDashboard();
 
-      setMessageType("success");
+        setTimeout(() => {
+          setMessage("");
+          setMessageType("");
+        }, 3000);
+      })
+      .catch((error) => {
+        setMessage(error.message);
+        setMessageType("error");
 
-      loadDashboard();
-
-      setTimeout(() => {
-        setMessage("");
-        setMessageType("");
-      }, 3000);
-    })
-    .catch((error) => {
-      setMessage(error.message);
-      setMessageType("error");
-
-      setTimeout(() => {
-        setMessage("");
-        setMessageType("");
-      }, 3000);
-    })
-    .finally(() => {
-      setLoading(false);
-    });
-};
+        setTimeout(() => {
+          setMessage("");
+          setMessageType("");
+        }, 3000);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
 
   return (
     <div className="app">
-
       {/* Header */}
       <header className="header">
         <div>
@@ -166,230 +150,149 @@ const ws = new WebSocket(
           <p>Paper Trading Dashboard</p>
         </div>
 
-        <div className="user-badge">
-          👤 Varsha
-        </div>
+        <div className="user-badge">👤 Varsha</div>
       </header>
-
 
       {/* Main Content */}
       <main className="container">
-
         {/* Summary Cards */}
         <section className="summary-grid">
+          {/* Available Balance */}
+          <div className="summary-card">
+            <span>Available Balance</span>
+            <h2>₹{balance ?? "Loading..."}</h2>
+            <small>Cash available for trading</small>
+          </div>
 
-  {/* Available Balance */}
-  <div className="summary-card">
-    <span>Available Balance</span>
+          {/* Holdings */}
+          <div className="summary-card">
+            <span>Holdings</span>
+            <h2>
+              {portfolio.reduce(
+                (total, item) => total + item.quantity,
+                0
+              )}
+            </h2>
+            <small>Total shares owned</small>
+          </div>
 
-    <h2>
-      ₹{balance ?? "Loading..."}
-    </h2>
+          {/* Holdings Value */}
+          <div className="summary-card">
+            <span>Holdings Value</span>
+            <h2>
+              ₹
+              {portfolio
+                .reduce(
+                  (total, item) => total + Number(item.current_value),
+                  0
+                )
+                .toFixed(2)}
+            </h2>
+            <small>Current market value</small>
+          </div>
 
-    <small>Cash available for trading</small>
-  </div>
-
-
-  {/* Holdings */}
-  <div className="summary-card">
-    <span>Holdings</span>
-
-    <h2>
-      {portfolio.reduce(
-        (total, item) => total + item.quantity,
-        0
-      )}
-    </h2>
-
-    <small>Total shares owned</small>
-  </div>
-
-
-  {/* Holdings Value */}
-  <div className="summary-card">
-    <span>Holdings Value</span>
-
-    <h2>
-  ₹
-  {portfolio
-    .reduce(
-      (total, item) =>
-        total + Number(item.current_value),
-      0
-    )
-    .toFixed(2)}
-</h2>
-
-    <small>Current market value</small>
-  </div>
-
-
-  {/* Total Account Value */}
-  <div className="summary-card">
-    <span>Total Account Value</span>
-
-    <h2>
-      ₹
-      {(
-        Number(balance || 0) +
-        portfolio.reduce(
-          (total, item) =>
-            total + Number(item.current_value),
-          0
-        )
-      ).toFixed(2)}
-    </h2>
-
-    <small>Cash + holdings</small>
-  </div>
-
-</section>
-
+          {/* Total Account Value */}
+          <div className="summary-card">
+            <span>Total Account Value</span>
+            <h2>
+              ₹
+              {(
+                Number(balance || 0) +
+                portfolio.reduce(
+                  (total, item) => total + Number(item.current_value),
+                  0
+                )
+              ).toFixed(2)}
+            </h2>
+            <small>Cash + holdings</small>
+          </div>
+        </section>
 
         {/* Message */}
-        {message && (
-  <div className={`message ${messageType}`}>
-    {message}
-  </div>
-)}
-
+        {message && <div className={`message ${messageType}`}>{message}</div>}
 
         {/* Market */}
-<section className="section-card">
-
-  <div className="section-header">
-    <div>
-      <h2>Market</h2>
-      <p>Available stocks</p>
-    </div>
-  </div>
-
-  <div className="stock-list">
-
-    {stocks.map((stock) => {
-
-      const holding = portfolio.find(
-        (item) => item.stock_id === stock.id
-      );
-
-      const ownedQuantity = holding
-        ? holding.quantity
-        : 0;
-
-      const selectedQuantity =
-        quantities[stock.id] || 1;
-
-      const cannotSell =
-        selectedQuantity > ownedQuantity;
-
-      return (
-        <div
-          className="stock-row"
-          key={stock.id}
-        >
-
-          {/* Stock Information */}
-          <div className="stock-info">
-
-            <div className="stock-icon">
-              {stock.symbol.charAt(0)}
-            </div>
-
+        <section className="section-card">
+          <div className="section-header">
             <div>
-              <strong>
-                {stock.symbol}
-              </strong>
-
-              <span>
-                Indian Equity
-              </span>
-
-              <small className="owned-shares">
-                Owned: {ownedQuantity}
-              </small>
+              <h2>Market</h2>
+              <p>Available stocks</p>
             </div>
-
           </div>
 
+          <div className="stock-list">
+            {stocks.map((stock) => {
+              const holding = portfolio.find(
+                (item) => item.stock_id === stock.id
+              );
+              const ownedQuantity = holding ? holding.quantity : 0;
+              const selectedQuantity = quantities[stock.id] || 1;
+              const cannotSell = selectedQuantity > ownedQuantity;
 
-          {/* Stock Price */}
-          <div className="stock-price">
-            ₹{stock.price}
+              return (
+                <div className="stock-row" key={stock.id}>
+                  {/* Stock Information */}
+                  <div className="stock-info">
+                    <div className="stock-icon">
+                      {stock.symbol.charAt(0)}
+                    </div>
+
+                    <div>
+                      <strong>{stock.symbol}</strong>
+                      <span>Indian Equity</span>
+                      <small className="owned-shares">
+                        Owned: {ownedQuantity}
+                      </small>
+                    </div>
+                  </div>
+
+                  {/* Stock Price */}
+                  <div className="stock-price">₹{stock.price}</div>
+
+                  {/* Quantity and buttons */}
+                  <div className="stock-actions">
+                    <input
+                      type="number"
+                      min="1"
+                      value={quantities[stock.id] || 1}
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+
+                        if (value >= 1) {
+                          setQuantities({
+                            ...quantities,
+                            [stock.id]: value,
+                          });
+                        }
+                      }}
+                    />
+
+                    {/* BUY */}
+                    <button
+                      className="buy-btn"
+                      disabled={loading}
+                      onClick={() => placeOrder(stock.id, "BUY")}
+                    >
+                      {loading ? "..." : "BUY"}
+                    </button>
+
+                    {/* SELL */}
+                    <button
+                      className="sell-btn"
+                      disabled={loading || cannotSell}
+                      onClick={() => placeOrder(stock.id, "SELL")}
+                    >
+                      {loading ? "..." : "SELL"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-
-
-          {/* Quantity + Buttons */}
-          <div className="stock-actions">
-
-            <input
-              type="number"
-              min="1"
-              value={
-                quantities[stock.id] || 1
-              }
-              onChange={(event) => {
-
-                const value =
-                  Number(event.target.value);
-
-                if (value >= 1) {
-                  setQuantities({
-                    ...quantities,
-                    [stock.id]: value,
-                  });
-                }
-
-              }}
-            />
-
-
-            {/* BUY */}
-            <button
-              className="buy-btn"
-              disabled={loading}
-              onClick={() =>
-                placeOrder(
-                  stock.id,
-                  "BUY"
-                )
-              }
-            >
-              {loading ? "..." : "BUY"}
-            </button>
-
-
-            {/* SELL */}
-            <button
-              className="sell-btn"
-              disabled={
-                loading ||
-                cannotSell
-              }
-              onClick={() =>
-                placeOrder(
-                  stock.id,
-                  "SELL"
-                )
-              }
-            >
-              {loading ? "..." : "SELL"}
-            </button>
-
-          </div>
-
-        </div>
-      );
-
-    })}
-
-  </div>
-
-</section>
-
+        </section>
 
         {/* Portfolio */}
         <section className="section-card">
-
           <div className="section-header">
             <div>
               <h2>My Portfolio</h2>
@@ -397,90 +300,47 @@ const ws = new WebSocket(
             </div>
           </div>
 
-
           {portfolio.length === 0 ? (
-
-            <div className="empty-state">
-              No holdings yet.
-            </div>
-
+            <div className="empty-state">No holdings yet.</div>
           ) : (
-
             <div className="table-container">
-
               <table>
-
                 <thead>
                   <tr>
                     <th>Stock</th>
                     <th>Quantity</th>
                     <th>Average Price</th>
                     <th>Current Value</th>
-                    <th>P&L</th>
+                    <th>P&amp;L</th>
                   </tr>
                 </thead>
 
-
                 <tbody>
-
                   {portfolio.map((holding) => (
-
-                    <tr
-                      key={holding.stock_id}
-                    >
-
+                    <tr key={holding.stock_id}>
                       <td>
-                        <strong>
-                          {holding.symbol}
-                        </strong>
+                        <strong>{holding.symbol}</strong>
                       </td>
-
-
-                      <td>
-                        {holding.quantity}
-                      </td>
-
-
-                      <td>
-                        ₹{holding.average_price}
-                      </td>
-
-
-                      <td>
-                        ₹{holding.current_value}
-                      </td>
-
-
+                      <td>{holding.quantity}</td>
+                      <td>₹{holding.average_price}</td>
+                      <td>₹{holding.current_value}</td>
                       <td
                         className={
-                          Number(
-                            holding.pnl
-                          ) >= 0
-                            ? "profit"
-                            : "loss"
+                          Number(holding.pnl) >= 0 ? "profit" : "loss"
                         }
                       >
                         ₹{holding.pnl}
                       </td>
-
                     </tr>
-
                   ))}
-
                 </tbody>
-
               </table>
-
             </div>
-
           )}
-
         </section>
-
 
         {/* Transaction History */}
         <section className="section-card">
-
           <div className="section-header">
             <div>
               <h2>Transaction History</h2>
@@ -488,11 +348,8 @@ const ws = new WebSocket(
             </div>
           </div>
 
-
           <div className="table-container">
-
             <table>
-
               <thead>
                 <tr>
                   <th>Action</th>
@@ -502,58 +359,30 @@ const ws = new WebSocket(
                 </tr>
               </thead>
 
-
               <tbody>
-
-                {orders
-                  .slice(0, 10)
-                  .map((order) => (
-
-                    <tr key={order.id}>
-
-                      <td>
-
-                        <span
-                          className={
-                            order.action === "BUY"
-                              ? "badge buy-badge"
-                              : "badge sell-badge"
-                          }
-                        >
-                          {order.action}
-                        </span>
-
-                      </td>
-
-
-                      <td>
-                        {order.symbol}
-                      </td>
-
-
-                      <td>
-                        {order.quantity}
-                      </td>
-
-
-                      <td>
-                        ₹{order.price}
-                      </td>
-
-                    </tr>
-
-                  ))}
-
+                {orders.slice(0, 10).map((order) => (
+                  <tr key={order.id}>
+                    <td>
+                      <span
+                        className={
+                          order.action === "BUY"
+                            ? "badge buy-badge"
+                            : "badge sell-badge"
+                        }
+                      >
+                        {order.action}
+                      </span>
+                    </td>
+                    <td>{order.symbol}</td>
+                    <td>{order.quantity}</td>
+                    <td>₹{order.price}</td>
+                  </tr>
+                ))}
               </tbody>
-
             </table>
-
           </div>
-
         </section>
-
       </main>
-
     </div>
   );
 }
