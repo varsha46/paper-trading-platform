@@ -37,7 +37,12 @@ const [quantities, setQuantities] = useState({});
 
   // Connect to FastAfetch(`${API_URL}/users/1/orders`)PI WebSocket
   const socket = new WebSocket(
-    `ws://${window.location.host}/ws/prices`
+    const wsProtocol =
+  window.location.protocol === "https:" ? "wss:" : "ws:";
+
+const ws = new WebSocket(
+  `${wsProtocol}//${window.location.host}/ws/prices`
+);
   );
 
   socket.onopen = () => {
